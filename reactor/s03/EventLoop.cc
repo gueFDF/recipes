@@ -20,7 +20,7 @@
 
 using namespace muduo;
 
-__thread EventLoop* t_loopInThisThread = 0;
+__thread EventLoop *t_loopInThisThread = 0;
 const int kPollTimeMs = 10000;
 
 static int createEventfd()
@@ -35,14 +35,14 @@ static int createEventfd()
 }
 
 EventLoop::EventLoop()
-  : looping_(false),
-    quit_(false),
-    callingPendingFunctors_(false),
-    threadId_(CurrentThread::tid()),
-    poller_(new Poller(this)),
-    timerQueue_(new TimerQueue(this)),
-    wakeupFd_(createEventfd()),
-    wakeupChannel_(new Channel(this, wakeupFd_))
+    : looping_(false),
+      quit_(false),
+      callingPendingFunctors_(false),
+      threadId_(CurrentThread::tid()),
+      poller_(new Poller(this)),
+      timerQueue_(new TimerQueue(this)),
+      wakeupFd_(createEventfd()),
+      wakeupChannel_(new Channel(this, wakeupFd_))
 {
   LOG_TRACE << "EventLoop created " << this << " in thread " << threadId_;
   if (t_loopInThisThread)
@@ -54,6 +54,8 @@ EventLoop::EventLoop()
   {
     t_loopInThisThread = this;
   }
+
+  //注册wakeupchannel_,设置读回调（也就是读一个字节）
   wakeupChannel_->setReadCallback(
       boost::bind(&EventLoop::handleRead, this));
   // we are always reading the wakeupfd
@@ -79,10 +81,12 @@ void EventLoop::loop()
     activeChannels_.clear();
     pollReturnTime_ = poller_->poll(kPollTimeMs, &activeChannels_);
     for (ChannelList::iterator it = activeChannels_.begin();
-        it != activeChannels_.end(); ++it)
+         it != activeChannels_.end(); ++it)
     {
       (*it)->handleEvent();
     }
+
+    //在poll之后，doPendingFunctors之前调用queueInLoop()，才无需wakeup唤醒
     doPendingFunctors();
   }
 
@@ -99,49 +103,53 @@ void EventLoop::quit()
   }
 }
 
-void EventLoop::runInLoop(const Functor& cb)
+void EventLoop::runInLoop(const Functor &cb)
 {
+  //如果在当前IO的线程,就直接执行回调
   if (isInLoopThread())
   {
     cb();
   }
-  else
+  else //不在就加入队里当中，然后唤醒IO线程去执行该回调函数
   {
     queueInLoop(cb);
   }
 }
 
-void EventLoop::queueInLoop(const Functor& cb)
+void EventLoop::queueInLoop(const Functor &cb)
 {
+  //因为该调用可能在当前IO线程，为了确保线程安全吗，所以要加锁保护
   {
-  MutexLockGuard lock(mutex_);
-  pendingFunctors_.push_back(cb);
+    MutexLockGuard lock(mutex_);
+    pendingFunctors_.push_back(cb);
   }
 
+  //在必要时唤醒IO线程
+  //必要 ：1.不在IO线程调用queueInLoop();2.该IO线程正在执行pendinng functor
   if (!isInLoopThread() || callingPendingFunctors_)
   {
     wakeup();
   }
 }
 
-TimerId EventLoop::runAt(const Timestamp& time, const TimerCallback& cb)
+TimerId EventLoop::runAt(const Timestamp &time, const TimerCallback &cb)
 {
   return timerQueue_->addTimer(cb, time, 0.0);
 }
 
-TimerId EventLoop::runAfter(double delay, const TimerCallback& cb)
+TimerId EventLoop::runAfter(double delay, const TimerCallback &cb)
 {
   Timestamp time(addTime(Timestamp::now(), delay));
   return runAt(time, cb);
 }
 
-TimerId EventLoop::runEvery(double interval, const TimerCallback& cb)
+TimerId EventLoop::runEvery(double interval, const TimerCallback &cb)
 {
   Timestamp time(addTime(Timestamp::now(), interval));
   return timerQueue_->addTimer(cb, time, interval);
 }
 
-void EventLoop::updateChannel(Channel* channel)
+void EventLoop::updateChannel(Channel *channel)
 {
   assert(channel->ownerLoop() == this);
   assertInLoopThread();
@@ -152,7 +160,7 @@ void EventLoop::abortNotInLoopThread()
 {
   LOG_FATAL << "EventLoop::abortNotInLoopThread - EventLoop " << this
             << " was created in threadId_ = " << threadId_
-            << ", current thread id = " <<  CurrentThread::tid();
+            << ", current thread id = " << CurrentThread::tid();
 }
 
 void EventLoop::wakeup()
@@ -180,9 +188,12 @@ void EventLoop::doPendingFunctors()
   std::vector<Functor> functors;
   callingPendingFunctors_ = true;
 
+  //先将回调任务swap到局部变量中
+  //原因： 1.防止阻塞其他进程
+  //      2.防止死锁(在回调任务当中可能也会调用queueInLoop()函数)
   {
-  MutexLockGuard lock(mutex_);
-  functors.swap(pendingFunctors_);
+    MutexLockGuard lock(mutex_);
+    functors.swap(pendingFunctors_);
   }
 
   for (size_t i = 0; i < functors.size(); ++i)
@@ -191,4 +202,3 @@ void EventLoop::doPendingFunctors()
   }
   callingPendingFunctors_ = false;
 }
-

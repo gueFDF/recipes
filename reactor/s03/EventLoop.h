@@ -52,10 +52,14 @@ class EventLoop : boost::noncopyable
   /// It wakes up the loop, and run the cb.
   /// If in the same loop thread, cb is run within the function.
   /// Safe to call from other threads.
+  
+  //立刻执行回调任务，如果是在其他线程调用该函数，回调任务会被加入队列当中，IO线程会被唤醒，执行该回调
   void runInLoop(const Functor& cb);
   /// Queues callback in the loop thread.
   /// Runs after finish pooling.
   /// Safe to call from other threads.
+
+  //将任务cb放入队列，并在必要时唤醒IO线程
   void queueInLoop(const Functor& cb);
 
   // timers
@@ -79,6 +83,12 @@ class EventLoop : boost::noncopyable
   // void cancel(TimerId timerId);
 
   // internal use only
+
+  //唤醒机制就是，eventloop创建时，会注册一个wakefd_，该文件描述符始终关注读事件
+  //当执行wakeup()函数时，会向wakefd_写入一个字符数据，原本阻塞在poll的io线程就会被唤醒
+  //执行所触发事件的文件描述符所绑定的回调函数，wakefd_绑定的回调函数是handleRead()（读一个字节）
+  //该回调的作用仅仅只是将wakeup()写入的一个字符数据读出。在poll循环中最后会执行
+  //doPendingFunctors函数执行所有等待队列中的函数任务
   void wakeup();
   void updateChannel(Channel* channel);
   // void removeChannel(Channel* channel);
@@ -103,6 +113,8 @@ class EventLoop : boost::noncopyable
 
   bool looping_; /* atomic */
   bool quit_; /* atomic */
+
+  //该字段是用来标识是否正在处理pendingFunctors_(),从而判断wakeup时机，若正在执行pendingFunctors_则w需要akeup
   bool callingPendingFunctors_; /* atomic */
   const pid_t threadId_;
   Timestamp pollReturnTime_;
@@ -111,9 +123,15 @@ class EventLoop : boost::noncopyable
   int wakeupFd_;
   // unlike in TimerQueue, which is an internal class,
   // we don't expose Channel to client.
+
+  //该channel用于处理wakeup_上的readable事件，将事件分发至handleRead()函数处理
   boost::scoped_ptr<Channel> wakeupChannel_;
   ChannelList activeChannels_;
+
+  //pendingFunctors_会暴露给其他线程，需要mutex的保护
   MutexLock mutex_;
+
+  //未执行的任务队列
   std::vector<Functor> pendingFunctors_; // @GuardedBy mutex_
 };
 
